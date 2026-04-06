@@ -1,0 +1,9 @@
+1. The function that called syscall is usertrap.
+
+2. p->trapframe->a7 is 0x80001cf8. It represents the system call number for exec.
+
+3. The previous CPU mode was user mode.
+
+4. The kernel panics at the instruction `lw a3, 0(zero)`. The variable `num` corresponds to register `a3`.
+
+5. The kernel crashes because it dereferences a null pointer and tries to load from virtual address 0. Address 0 is not mapped in the kernel address space, so this causes a load page fault. `scause = 0xd` confirms that it is a load page fault.
