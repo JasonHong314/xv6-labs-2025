@@ -11,15 +11,13 @@ struct spinlock {
 #endif
 };
 
-// #ifdef LAB_LOCK
+#ifdef LAB_LOCK
 // Reader-writer lock.
 struct rwspinlock {
-  struct spinlock l;
-  struct spinlock r;
-  int readers;
-  int writer;
-  int pending_writers;
-  struct cpu *cpu;
+  volatile int readers;          // number of active readers
+  volatile int pending_writers;  // number of waiting writers
+  volatile int writer;           // 1 if a writer holds the lock
+  struct cpu *cpu;               // writer owner, for debugging
 };
 
-// #endif
+#endif

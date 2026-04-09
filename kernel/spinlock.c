@@ -120,63 +120,75 @@ release(struct spinlock *lk)
   pop_off();
 }
 
-// #ifdef LAB_LOCK
+#ifdef LAB_LOCK
 static void
 read_acquire_inner(struct rwspinlock *rwlk)
 {
   for(;;){
-    acquire(&rwlk->r);
-    if(rwlk->writer == 0 && rwlk->pending_writers == 0){
-      acquire(&rwlk->l);
-      rwlk->readers++;
-      release(&rwlk->l);
-      release(&rwlk->r);
+    // If there is an active writer or any pending writer, wait.
+    while(__atomic_load_n(&rwlk->writer, __ATOMIC_ACQUIRE) != 0 ||
+          __atomic_load_n(&rwlk->pending_writers, __ATOMIC_ACQUIRE) != 0)
+      ;
+
+    // Tentatively join readers.
+    __sync_fetch_and_add(&rwlk->readers, 1);
+    __sync_synchronize();
+
+    // Re-check after incrementing readers.
+    // If a writer appeared concurrently, back out and retry.
+    if(__atomic_load_n(&rwlk->writer, __ATOMIC_ACQUIRE) == 0 &&
+       __atomic_load_n(&rwlk->pending_writers, __ATOMIC_ACQUIRE) == 0){
       break;
     }
-    release(&rwlk->r);
+
+    __sync_fetch_and_sub(&rwlk->readers, 1);
   }
 }
 
 static void
 read_release_inner(struct rwspinlock *rwlk)
 {
-  acquire(&rwlk->r);
-  if(rwlk->readers==0)
+  int old;
+
+  old = __sync_fetch_and_sub(&rwlk->readers, 1);
+  if(old <= 0)
     panic("read_release");
-  rwlk->readers--;
-  release(&rwlk->r);
 }
 
 static void
 write_acquire_inner(struct rwspinlock *rwlk)
 {
-  acquire(&rwlk->l);
-  rwlk->pending_writers++;
-  release(&rwlk->l);
+  // Announce writer intent first, so subsequent readers must wait.
+  __sync_fetch_and_add(&rwlk->pending_writers, 1);
 
   for(;;){
-    acquire(&rwlk->l);
-    if(rwlk->writer == 0 && rwlk->readers == 0){
-      rwlk->pending_writers--;
-      rwlk->writer = 1;
+    // Wait until all readers drain and no writer is active.
+    while(__atomic_load_n(&rwlk->readers, __ATOMIC_ACQUIRE) != 0 ||
+          __atomic_load_n(&rwlk->writer, __ATOMIC_ACQUIRE) != 0)
+      ;
+
+    // Try to become the active writer.
+    if(__sync_bool_compare_and_swap(&rwlk->writer, 0, 1)){
       rwlk->cpu = mycpu();
-      release(&rwlk->l);
-      break;
+      __sync_fetch_and_sub(&rwlk->pending_writers, 1);
+      __sync_synchronize();
+      return;
     }
-    release(&rwlk->l);
   }
 }
 
 static void
 write_release_inner(struct rwspinlock *rwlk)
 {
-  acquire(&rwlk->l);
-  if(rwlk->writer == 0 || rwlk->cpu != mycpu())
+  if(__atomic_load_n(&rwlk->writer, __ATOMIC_ACQUIRE) == 0 ||
+     rwlk->cpu != mycpu())
     panic("write_release");
-  rwlk->writer = 0;
+
   rwlk->cpu = 0;
-  release(&rwlk->l);
+  __sync_synchronize();
+  __atomic_store_n(&rwlk->writer, 0, __ATOMIC_RELEASE);
 }
+
 void
 read_acquire(struct rwspinlock *rwlk)
 {
@@ -208,14 +220,11 @@ write_release(struct rwspinlock *rwlk)
 void
 initrwlock(struct rwspinlock *rwlk)
 {
-  initlock(&rwlk->l, "rwlk");
-  initlock(&rwlk->r, "rwlk");
   rwlk->readers = 0;
-  rwlk->writer = 0;
   rwlk->pending_writers = 0;
+  rwlk->writer = 0;
   rwlk->cpu = 0;
 }
-
 // Test rwspinlock implementation.
 static void
 rwspinlock_test_step(uint step, const char *msg)
@@ -444,7 +453,7 @@ sys_rwlktest()
 
   return r;
 }
-// #endif
+#endif
 
 // Check whether this cpu is holding the lock.
 // Interrupts must be off.
