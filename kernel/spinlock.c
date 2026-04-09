@@ -120,35 +120,63 @@ release(struct spinlock *lk)
   pop_off();
 }
 
-#ifdef LAB_LOCK
+// #ifdef LAB_LOCK
 static void
 read_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  acquire(&rwlk->l);
+  for(;;){
+    acquire(&rwlk->r);
+    if(rwlk->writer == 0 && rwlk->pending_writers == 0){
+      acquire(&rwlk->l);
+      rwlk->readers++;
+      release(&rwlk->l);
+      release(&rwlk->r);
+      break;
+    }
+    release(&rwlk->r);
+  }
 }
 
 static void
 read_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  release(&rwlk->l);
+  acquire(&rwlk->r);
+  if(rwlk->readers==0)
+    panic("read_release");
+  rwlk->readers--;
+  release(&rwlk->r);
 }
 
 static void
 write_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
   acquire(&rwlk->l);
+  rwlk->pending_writers++;
+  release(&rwlk->l);
+
+  for(;;){
+    acquire(&rwlk->l);
+    if(rwlk->writer == 0 && rwlk->readers == 0){
+      rwlk->pending_writers--;
+      rwlk->writer = 1;
+      rwlk->cpu = mycpu();
+      release(&rwlk->l);
+      break;
+    }
+    release(&rwlk->l);
+  }
 }
 
 static void
 write_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
+  acquire(&rwlk->l);
+  if(rwlk->writer == 0 || rwlk->cpu != mycpu())
+    panic("write_release");
+  rwlk->writer = 0;
+  rwlk->cpu = 0;
   release(&rwlk->l);
 }
-
 void
 read_acquire(struct rwspinlock *rwlk)
 {
@@ -180,8 +208,12 @@ write_release(struct rwspinlock *rwlk)
 void
 initrwlock(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
   initlock(&rwlk->l, "rwlk");
+  initlock(&rwlk->r, "rwlk");
+  rwlk->readers = 0;
+  rwlk->writer = 0;
+  rwlk->pending_writers = 0;
+  rwlk->cpu = 0;
 }
 
 // Test rwspinlock implementation.
@@ -412,7 +444,7 @@ sys_rwlktest()
 
   return r;
 }
-#endif
+// #endif
 
 // Check whether this cpu is holding the lock.
 // Interrupts must be off.
