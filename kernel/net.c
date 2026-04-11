@@ -10,6 +10,24 @@
 #include "file.h"
 #include "net.h"
 
+#define MAX_PORT_SLOTS 20
+
+static struct {
+  uint16 port;
+  uint8 in_flight;
+  uint8 r_idx;
+  uint8 w_idx;
+  struct spinlock port_lock;
+  struct {
+    int src_ip;
+    short sport;
+    char *buf;
+    char *buf_owner;
+    int len;
+  } ring[16];
+} ports_info[MAX_PORT_SLOTS];
+
+
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
@@ -23,6 +41,10 @@ void
 netinit(void)
 {
   initlock(&netlock, "netlock");
+  memset(ports_info,0,sizeof ports_info);
+  for(int i = 0; i < NPROC; ++i){
+    initlock(&ports_info[i].port_lock,"net_portlock");
+  }
 }
 
 
@@ -38,8 +60,30 @@ sys_bind(void)
   // Your code here.
   //
 
-  return -1;
+  int port;
+
+  argint(0, &port);
+
+  for (int i = 0; i < MAX_PORT_SLOTS; ++i) {
+    acquire(&ports_info[i].port_lock);
+
+    if (ports_info[i].port != 0) {
+      release(&ports_info[i].port_lock);
+      continue;
+    }
+
+    ports_info[i].in_flight = 0;
+    ports_info[i].r_idx = 0;
+    ports_info[i].w_idx = 0;
+    ports_info[i].port = port;
+    memset(ports_info[i].ring, 0, sizeof(ports_info[i].ring));
+    release(&ports_info[i].port_lock);
+    break;
+  }
+
+  return 0;
 }
+
 
 //
 // unbind(int port)
@@ -77,7 +121,63 @@ sys_recv(void)
   //
   // Your code here.
   //
-  return -1;
+
+  int dport;
+  uint64 p_src_ip;
+  uint64 p_src_port;
+  uint64 p_dest_buf;
+  int maxlen;
+  int i;
+  int port_idx = -1;
+
+  struct proc *p = myproc(); 
+  pagetable_t pt = p->pagetable;
+
+  argint(0, &dport);
+  argaddr(1, &p_src_ip);
+  argaddr(2, &p_src_port);
+  argaddr(3, &p_dest_buf);
+  argint(4, &maxlen);
+ 
+  for (i = 0; i < MAX_PORT_SLOTS; ++i) {
+    acquire(&ports_info[i].port_lock);
+    if (ports_info[i].port != dport) {
+      release(&ports_info[i].port_lock);
+      continue;
+    } else {
+      port_idx = i;
+      release(&ports_info[i].port_lock);
+      break;
+    }
+  }
+
+  // returns err when the port wasn't bound
+  if (port_idx == -1) {
+    return -1;
+  }
+
+  acquire(&ports_info[port_idx].port_lock);
+
+  while (ports_info[port_idx].in_flight == 0) {
+    sleep(&ports_info[port_idx], &ports_info[port_idx].port_lock); 
+  }
+
+  int r_idx = ports_info[port_idx].r_idx;
+  copyout(pt, p_src_ip, (char*) &ports_info[port_idx].ring[r_idx].src_ip, sizeof(uint32));
+  copyout(pt, p_src_port, (char*) &ports_info[port_idx].ring[r_idx].sport, sizeof(uint16));
+
+  int b_copied = maxlen;
+  if (ports_info[port_idx].ring[r_idx].len < b_copied) {
+    b_copied = ports_info[port_idx].ring[r_idx].len;
+  }
+  copyout(pt, p_dest_buf, ports_info[port_idx].ring[r_idx].buf, b_copied);
+
+  kfree(ports_info[port_idx].ring[r_idx].buf_owner);
+  ports_info[port_idx].r_idx = (r_idx + 1) % 16;
+  ports_info[port_idx].in_flight--;
+  release(&ports_info[port_idx].port_lock);
+
+  return b_copied;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -180,6 +280,62 @@ sys_send(void)
 }
 
 void
+udp_rx(char *buf, int len)
+{
+  struct eth *ineth = (struct eth*) buf;
+  struct ip *inip = (struct ip*)(ineth + 1);
+  struct udp *inudp = (struct udp*)(inip + 1);
+  
+  uint32 src_ip = ntohl(inip->ip_src);
+  uint16 dport = ntohs(inudp->dport);
+  uint16 sport = ntohs(inudp->sport);
+  uint16 blen = ntohs(inudp->ulen) - sizeof(struct udp);
+  
+  int i;
+  int port_idx = -1;
+  for (i = 0; i < MAX_PORT_SLOTS; ++i) {
+    acquire(&ports_info[i].port_lock);
+    if (ports_info[i].port != dport) {
+      release(&ports_info[i].port_lock);
+      continue;
+    } else {
+      port_idx = i;
+      release(&ports_info[i].port_lock);
+      break;
+    }
+  }
+
+  // drop the pack when the port is not bound
+  if (port_idx == -1) {
+    kfree(buf);
+    return;
+  }
+
+  acquire(&ports_info[port_idx].port_lock);
+  
+  if (ports_info[port_idx].in_flight >= 16) {
+    kfree(buf);
+    release(&ports_info[port_idx].port_lock);
+    return;
+  }
+
+  uint8 w_idx = ports_info[port_idx].w_idx;
+  ports_info[port_idx].ring[w_idx].src_ip = src_ip;
+  ports_info[port_idx].ring[w_idx].sport = sport;
+  ports_info[port_idx].ring[w_idx].buf = (char*)(inudp + 1);
+  ports_info[port_idx].ring[w_idx].len = blen; 
+  ports_info[port_idx].ring[w_idx].buf_owner = buf;
+
+  ports_info[port_idx].in_flight++;
+  ports_info[port_idx].w_idx = (w_idx + 1) % 16;
+  
+  release(&ports_info[port_idx].port_lock);
+  wakeup(&ports_info[port_idx]);
+  return;
+}
+
+
+void
 ip_rx(char *buf, int len)
 {
   // don't delete this printf; make grade depends on it.
@@ -191,7 +347,17 @@ ip_rx(char *buf, int len)
   //
   // Your code here.
   //
-  
+  struct eth *ineth = (struct eth*) buf;
+  struct ip *inip = (struct ip*) (ineth + 1);
+
+  switch (inip->ip_p) {
+  case IPPROTO_UDP:
+    udp_rx(buf, len);
+    break;
+  default:
+    kfree(buf);
+    break;
+  }
 }
 
 //
