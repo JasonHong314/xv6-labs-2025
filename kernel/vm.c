@@ -303,23 +303,47 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      continue;   // page table entry hasn't been allocated
+      // panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
-      continue;   // physical page hasn't been allocated
+      // panic("uvmcopy: page not present");
+      continue;
+    // 1 - Set a COW flag;
+    // 2 - Clear the W flag;
+    // for both parent and children page.
+    if (PTE_FLAGS(*pte) & PTE_W) {
+      (*pte) |= PTE_COW;
+      (*pte) &= (~PTE_W);
+    }
+
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
+    
+    // Mapping the va of the child directly to its parent's,
+    // without allocating (kalloc) a new one for the time being.
+    mem = (char*)pa;
+    
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+      // We do not have to kfree(mem) for it's not really allocated.
       goto err;
     }
+
+    // ref count
+    k_page_ref_inc(pa);
   }
   return 0;
 
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+err:
+  // Rollback 
+  for (int j = 0; j < i; j += PGSIZE) {
+    pte = walk(old, j, 0);
+    if (PTE_FLAGS(*pte) & PTE_COW) {
+      (*pte) &= (~PTE_COW);
+      (*pte) |= (PTE_W);
+    }
+  }
+
+  uvmunmap(new, 0, i / PGSIZE, 0);
   return -1;
 }
 
@@ -359,9 +383,16 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
     pte = walk(pagetable, va0, 0);
     // forbid copyout over read-only user text pages.
-    if((*pte & PTE_W) == 0)
+    if (pte != 0 && (*pte & PTE_COW)) {
+      if (k_try_cow(pagetable, va0) == 0) {}
+      else return -1;
+    }
+
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
+       (*pte & PTE_W) == 0)
       return -1;
-      
+    pa0 = PTE2PA(*pte);
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -482,5 +513,62 @@ ismapped(pagetable_t pagetable, uint64 va)
   if (*pte & PTE_V){
     return 1;
   }
+  return 0;
+}
+
+
+int
+k_try_cow(pagetable_t pt, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *new_page;
+
+  va = PGROUNDDOWN(va);
+
+  if (va >= MAXVA)
+    return -1;
+
+  pte = walk(pt, va, 0);
+  if (pte == 0)
+    return -1;
+
+  if ((*pte & PTE_V) == 0)
+    return -1;
+
+  if ((*pte & PTE_U) == 0)
+    return -1;
+
+  if ((*pte & PTE_COW) == 0)
+    return -1;
+
+  pa = PTE2PA(*pte);
+
+  // 只有当前进程引用，直接恢复写权限即可
+  if (k_page_ref(pa) == 1) {
+    *pte = (*pte & ~PTE_COW) | PTE_W;
+    sfence_vma();
+    return 0;
+  }
+
+  new_page = kalloc();
+  if (new_page == 0)
+    return -1;
+
+  // 先拷贝旧页内容
+  memmove(new_page, (void *)pa, PGSIZE);
+
+  // 基于旧 flags 生成新 flags
+  flags = PTE_FLAGS(*pte);
+  flags = (flags | PTE_W) & ~PTE_COW;
+
+  // 更新当前进程页表项
+  *pte = PA2PTE((uint64)new_page) | flags;
+
+  // 旧物理页引用数减一
+  k_page_ref_dec(pa);
+
+  sfence_vma();
   return 0;
 }

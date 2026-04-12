@@ -16,6 +16,32 @@ void kernelvec();
 
 extern int devintr();
 
+int
+lazy_alloc_page(struct proc *p, uint64 va)
+{
+  char *mem;
+
+  va = PGROUNDDOWN(va);
+
+  if(va >= p->sz)
+    return -1;
+
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  memset(mem, 0, PGSIZE);
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem,
+              PTE_R | PTE_W | PTE_U) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  sfence_vma();
+  return 0;
+}
+
 void
 trapinit(void)
 {
@@ -42,35 +68,38 @@ usertrap(void)
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);  //DOC: kernelvec
+  w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
-  // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
-    // system call
 
+  if(r_scause() == 8){
     if(killed(p))
       kexit(-1);
-
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
     p->trapframe->epc += 4;
-
-    // an interrupt will change sepc, scause, and sstatus,
-    // so enable only now that we're done with those registers.
     intr_on();
-
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 va = PGROUNDDOWN(r_stval());
+    pte_t *pte = 0;
+
+    if(va >= p->sz || va < PGSIZE){
+      setkilled(p);
+    } else {
+      pte = walk(p->pagetable, va, 0);
+
+      if(pte == 0 || (*pte & PTE_V) == 0){
+        if(lazy_alloc_page(p, va) < 0)
+          setkilled(p);
+      } else if((*pte & PTE_COW) != 0){
+        if(k_try_cow(p->pagetable, va) < 0)
+          setkilled(p);
+      } else {
+        setkilled(p);
+      }
+    }
   } else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
@@ -80,19 +109,12 @@ usertrap(void)
   if(killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
 
   prepare_return();
-
-  // the user page table to switch to, for trampoline.S
-  uint64 satp = MAKE_SATP(p->pagetable);
-
-  // return to trampoline.S; satp value in a0.
-  return satp;
+  return MAKE_SATP(p->pagetable);
 }
-
 //
 // set up trapframe and control registers for a return to user space
 //
