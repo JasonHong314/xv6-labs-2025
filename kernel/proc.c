@@ -56,6 +56,7 @@ procinit(void)
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
   }
+
 }
 
 // Must be called with interrupts disabled,
@@ -131,6 +132,17 @@ found:
     release(&p->lock);
     return 0;
   }
+  //allocate trapframe page for backup
+  if((p->trapframe_bk = (struct trapframe *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  p->invoking = 0;
+  p->ticks_passed = 0;
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
@@ -139,6 +151,7 @@ found:
     release(&p->lock);
     return 0;
   }
+
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -158,6 +171,9 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->trapframe_bk)
+    kfree((void*)p->trapframe_bk);
+  p->trapframe_bk = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -168,6 +184,12 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+
+  p->invoking = 0;
+  p->ticks_passed = 0;
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+  
   p->state = UNUSED;
 }
 

@@ -149,3 +149,23 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
 }
+
+static inline uint64
+r_fp()
+{
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r" (x) );
+  return x;
+}
+
+void
+backtrace(void)
+{
+  uint64 fp = r_fp();
+  uint64 stack_lower = PGROUNDDOWN(fp);
+  uint64 stack_upper = stack_lower + PGSIZE;
+  do {
+    printf("%p\n", (uint64*)(*(uint64*)(fp - 8)));
+    fp = *(uint64*)(fp - 16);
+  } while (fp > stack_lower && fp < stack_upper);
+}

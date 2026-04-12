@@ -29,6 +29,45 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+void
+handle_time_passes(void)
+{
+  struct proc *p = myproc();
+
+  // If an application calls sigalarm(0, 0),
+  // the kernel should stop generating periodic alarm calls.
+  if (p->alarm_interval == 0 && p->alarm_handler == 0) {
+    return;
+  }
+  
+  // Prevent re-entrant calls to the handler.
+  if (p->invoking) {
+    return;
+  }
+
+  // Increment the ticks tracked by PCB.
+  p->ticks_passed++;
+
+  // Only invoke the alarm function if the process has a timer outstanding.
+  if (p->ticks_passed < p->alarm_interval) {
+    return;
+  }
+
+  // Back the trapframe up.
+  memmove(p->trapframe_bk, p->trapframe, PGSIZE);
+
+  // Set the invoking flag, 
+  // to prevent re-entrant calls to the handler.
+  p->invoking = 1;
+
+  // Set PC to jump to the handler function.
+  p->trapframe->epc = (uint64)p->alarm_handler;
+
+  return;
+}
+
+
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from, and returns to, trampoline.S
@@ -81,9 +120,10 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2){
+    handle_time_passes();
     yield();
-
+  }
   prepare_return();
 
   // the user page table to switch to, for trampoline.S
@@ -150,7 +190,6 @@ kerneltrap()
     printf("scause=0x%lx sepc=0x%lx stval=0x%lx\n", scause, r_sepc(), r_stval());
     panic("kerneltrap");
   }
-
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2 && myproc() != 0)
     yield();
