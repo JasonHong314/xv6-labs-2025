@@ -341,6 +341,38 @@ sys_open(void)
     return -1;
   }
 
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    for(int depth = 0;depth < 10 && ip->type == T_SYMLINK;depth++){
+      char target[MAXPATH];
+      // read symlink target path from inode data
+      if(readi(ip, 0, (uint64)target, 0, ip->size) != ip->size){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+
+      // drop current symlink inode
+      iunlockput(ip);
+
+      // look up the target path
+      if((ip = namei(target)) == 0){
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+    }
+    // too many levels: possible cycle
+    if(ip->type == T_SYMLINK){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+  }
+
+
+
+
+
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -501,5 +533,36 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+
+uint64 
+sys_symlink(void)
+{
+  char target[MAXPATH]; // The target that the symlink refers to.
+  char path[MAXPATH];   // The path where the symlink is created.
+  
+  argstr(0, target, MAXPATH);
+  argstr(1, path, MAXPATH);
+
+  int target_strlen = strlen(target); 
+
+  begin_op();
+  struct inode *ip = create(path, T_SYMLINK, 0, 0);
+  if (!ip) {
+    end_op();
+    return -1;
+  }
+
+  if (writei(ip, 0, (uint64)target, 0, target_strlen) != target_strlen) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+
   return 0;
 }
