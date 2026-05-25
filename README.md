@@ -4,18 +4,20 @@
 > 覆盖分支：`util`、`syscall`、`pgtbl`、`traps`、`cow`、`lock`、`fs`、`net`  
 
 
-## 0. 仓库组织方式
+# 0. 项目组织架构
 
-| 分支 | 对应实验 | 本报告重点 |
+
+| 分支名称 | 对应实验方向 | 主要实现内容 |
 |---|---|---|
-| `util` | 用户态工具实验 | `sleep`、`sixfive`、`memdump`、`find` |
-| `syscall` | 系统调用实验 | `pause/sleep`、`interpose`、`attack/secret` |
-| `pgtbl` | 页表实验 | `USYSCALL`、`vmprint`、`superpage` |
-| `traps` | Trap 实验 | `sigalarm`、`sigreturn`、trapframe 保存恢复 |
-| `cow` | Copy-on-Write 实验 | `fork` 懒拷贝、页引用计数、写时复制、`copyout` 处理 |
-| `lock` | 锁实验 | per-CPU freelist、读写自旋锁、锁统计 |
-| `fs` | 文件系统实验 | 大文件双重间接索引、符号链接 |
-| `net` | 网卡实验 | E1000 发送、接收、中断处理 |
+| `util` | 用户态工具实验 | 实现 `sleep`、`sixfive`、`memdump`、`find` 等用户态命令 |
+| `syscall` | 系统调用实验 | 增加系统调用接口，实现系统调用拦截机制，并完成 `attack/secret` 安全实验 |
+| `pgtbl` | 页表实验 | 实现 `USYSCALL`、页表打印 `vmprint`、2MB superpage 支持 |
+| `traps` | Trap 与中断实验 | 实现 backtrace、alarm 机制、`sigalarm/sigreturn`，理解 trapframe 保存恢复 |
+| `cow` | 写时复制实验 | 改造 `fork`，实现 COW 页表标记、物理页引用计数、page fault 处理 |
+| `lock` | 锁优化实验 | 实现 per-CPU freelist，降低内存分配锁竞争；实现读写自旋锁 |
+| `fs` | 文件系统实验 | 实现大文件双重间接索引和符号链接 `symlink` |
+| `net` | 网卡实验 | 实现 E1000 网卡的数据包发送、接收和中断处理逻辑 |
+
 
 
 
